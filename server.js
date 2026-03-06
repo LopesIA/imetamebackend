@@ -1,43 +1,45 @@
 const admin = require('firebase-admin');
-const { getFirestore } = require('firebase-admin/firestore'); // <-- ADICIONADO AQUI
 const express = require('express');
 
 // ========================================================================
-// 1. INICIALIZAÇÃO DO FIREBASE ADMIN (SEGURO PARA O RENDER)
+// 1. INICIALIZAÇÃO
 // ========================================================================
 let serviceAccount;
 
 try {
-    // Se estiver no Render, ele vai ler o texto do cofre secreto
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
         serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
     } else {
-        // Se estiver testando no seu PC, ele lê o arquivo normal
         serviceAccount = require('./serviceAccountKey.json');
     }
 } catch (error) {
     console.error("❌ ERRO CRÍTICO: Não foi possível carregar as credenciais do Firebase.");
-    console.error("Se estiver no Render, verifique se você criou a variável FIREBASE_SERVICE_ACCOUNT.");
     process.exit(1); 
 }
 
-const appFirebase = admin.initializeApp({
+admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
 
-// ========================================================================
-// A GRANDE CORREÇÃO: DIZENDO O NOME EXATO DO SEU BANCO DE DADOS
-// ========================================================================
-const db = getFirestore(appFirebase, "imetametransportebanco");
-
-// Memória local para sabermos o estado "anterior" da requisição
+// Usando o banco de dados PADRÃO do Firebase
+const db = admin.firestore();
 const estadoAnterior = new Map();
 
-console.log("🚀 Servidor de Notificações Imetame iniciado com sucesso!");
-console.log("👀 Vigiando o banco 'imetametransportebanco'...");
+console.log("======================================================");
+console.log("🚀 Servidor Imetame INICIADO (Versão DEFINITIVA com Radar)");
+console.log("======================================================");
 
 // ========================================================================
-// 2. FUNÇÃO PRINCIPAL DE DISPARO DE NOTIFICAÇÃO PUSH (FCM)
+// 📡 RADAR INICIAL - VERIFICA SE ESTÁ LENDO O LUGAR CERTO
+// ========================================================================
+db.collection('requisicoes').get().then(snap => {
+    console.log(`📡 [RADAR ATIVO]: O Firebase detectou ${snap.docs.length} requisições já cadastradas no banco.`);
+}).catch(err => {
+    console.log(`❌ Erro no Radar: Não conseguiu ler a coleção. Detalhes:`, err);
+});
+
+// ========================================================================
+// 2. FUNÇÃO DE DISPARO (FCM)
 // ========================================================================
 async function enviarNotificacao(tipoDestinatario, nomeDestinatario, titulo, mensagem) {
     try {
@@ -50,7 +52,7 @@ async function enviarNotificacao(tipoDestinatario, nomeDestinatario, titulo, men
         }
 
         if (!usuariosQuery || usuariosQuery.empty) {
-            console.log(`   [!] Nenhum usuário encontrado para: ${tipoDestinatario} (${nomeDestinatario || 'Geral'})`);
+            console.log(`   [!] Usuário não encontrado no banco para notificar: ${nomeDestinatario || 'Admins'}`);
             return;
         }
 
@@ -60,7 +62,7 @@ async function enviarNotificacao(tipoDestinatario, nomeDestinatario, titulo, men
             if (user.fcmToken) tokens.push(user.fcmToken); 
         });
 
-        console.log(`🔔 PREPARANDO AVISO [${tipoDestinatario === 'Admin' ? 'ADMINISTRADORES' : nomeDestinatario}]: ${titulo} - ${mensagem}`);
+        console.log(`🔔 DISPARANDO PUSH PARA [${nomeDestinatario || 'Admins'}]: ${titulo}`);
 
         if (tokens.length > 0) {
             const payload = {
@@ -68,17 +70,17 @@ async function enviarNotificacao(tipoDestinatario, nomeDestinatario, titulo, men
                 tokens: tokens
             };
             const response = await admin.messaging().sendMulticast(payload);
-            console.log(`   ✅ Sucesso: ${response.successCount} enviadas | Falhas: ${response.failureCount}`);
+            console.log(`   ✅ SUCESSO! Celulares notificados: ${response.successCount}`);
         } else {
-            console.log(`   ⚠️ Usuários encontrados, mas sem Token de celular cadastrado.`);
+            console.log(`   ⚠️ Os usuários foram achados, mas não possuem o Token (fcmToken) no banco de dados. Cadastre a permissão no App.`);
         }
     } catch (error) {
-        console.error("   ❌ Erro crítico ao enviar notificação:", error);
+        console.error("   ❌ Erro ao enviar notificação:", error);
     }
 }
 
 // ========================================================================
-// 3. O VIGIA: ESCUTANDO A COLEÇÃO 'REQUISICOES' EM TEMPO REAL
+// 3. O VIGIA EM TEMPO REAL
 // ========================================================================
 db.collection('requisicoes').onSnapshot(snapshot => {
     snapshot.docChanges().forEach(change => {
@@ -90,82 +92,54 @@ db.collection('requisicoes').onSnapshot(snapshot => {
         const prev = estadoAnterior.get(id) || {};
         const statusAnterior = prev.status;
 
+        // IGNORA A PRIMEIRA CARGA DO SERVIDOR
         if (!statusAnterior && change.type === 'added') {
             estadoAnterior.set(id, { status: statusAtual, sc: dados.sc, oc: dados.oc, nf: dados.nf, nfs: dados.nfs });
             return; 
         }
 
+        // REGRAS DE NOTIFICAÇÃO
         if (change.type === 'added' && statusAtual === 'AGUARDANDO_LIDER') {
-            enviarNotificacao('UsuarioEspecifico', dados.lider_solicitacao, 
-                'Nova Requisição da Equipe', 
-                `O encarregado ${dados.solicitante} criou a Req #${seq}. Aguardando sua aprovação.`
-            );
+            enviarNotificacao('UsuarioEspecifico', dados.lider_solicitacao, 'Nova Requisição da Equipe', `Req #${seq} aguardando sua aprovação.`);
         }
 
         if (statusAnterior === 'AGUARDANDO_LIDER' && statusAtual === 'SOLICITADO') {
-            enviarNotificacao('Admin', null, 
-                'Nova Requisição Aprovada', 
-                `A Req #${seq} foi aprovada pelo líder e aguarda Geração de SC.`
-            );
+            enviarNotificacao('Admin', null, 'Nova Requisição Aprovada', `Req #${seq} aprovada pelo líder.`);
         }
 
         if (change.type === 'added' && statusAtual === 'SOLICITADO') {
-            enviarNotificacao('Admin', null, 
-                'Nova Requisição Recebida', 
-                `A Req #${seq} foi criada por ${dados.solicitante} e aguarda Geração de SC.`
-            );
+            enviarNotificacao('Admin', null, 'Nova Requisição Recebida', `Req #${seq} criada por ${dados.solicitante}.`);
         }
 
         if (statusAnterior !== 'AGUARDANDO_OC' && statusAtual === 'AGUARDANDO_OC') {
-            enviarNotificacao('UsuarioEspecifico', dados.solicitante, 
-                'SC Gerada!', 
-                `A SC ${dados.sc} foi vinculada à sua Req #${seq}. Aguardando emissão da Ordem de Compra.`
-            );
+            enviarNotificacao('UsuarioEspecifico', dados.solicitante, 'SC Gerada!', `SC vinculada à Req #${seq}.`);
         }
 
         if (statusAnterior !== 'AGUARDANDO_NF' && statusAtual === 'AGUARDANDO_NF') {
-            enviarNotificacao('UsuarioEspecifico', dados.solicitante, 
-                'Ordem de Compra Emitida!', 
-                `A OC ${dados.oc_numero} foi anexada na Req #${seq}. Por favor, anexe a Nota Fiscal.`
-            );
+            enviarNotificacao('UsuarioEspecifico', dados.solicitante, 'Ordem de Compra Emitida!', `OC anexada na Req #${seq}. Anexe a NF.`);
         }
 
         const anexouNFNova = dados.nf && !prev.nf;
         const anexouNFSNova = dados.nfs && !prev.nfs;
 
         if ((statusAnterior !== 'EM_ANALISE_NF' && statusAtual === 'EM_ANALISE_NF') || anexouNFNova || anexouNFSNova) {
-            let tipoNota = anexouNFSNova ? 'Nota de Serviço' : 'DANFE';
-            if (anexouNFNova && anexouNFSNova) tipoNota = 'DANFE e Nota de Serviço';
-
-            enviarNotificacao('UsuarioEspecifico', dados.solicitante, 
-                'Nota Fiscal Recebida!', 
-                `Uma nova ${tipoNota} foi anexada na Req #${seq}. Acesse o sistema para carimbar e assinar.`
-            );
+            enviarNotificacao('UsuarioEspecifico', dados.solicitante, 'Nota Fiscal Recebida!', `Nova nota anexada na Req #${seq}. Acesse para assinar.`);
         }
 
         if (statusAnterior === 'EM_ANALISE_NF' && statusAtual === 'CONFERENCIA_NF') {
-            enviarNotificacao('Admin', null, 
-                'Notas Assinadas!', 
-                `${dados.solicitante} assinou os documentos da Req #${seq}. Pronta para conferência final.`
-            );
+            enviarNotificacao('Admin', null, 'Notas Assinadas!', `${dados.solicitante} assinou a Req #${seq}.`);
         }
 
         estadoAnterior.set(id, { status: statusAtual, sc: dados.sc, oc: dados.oc, nf: dados.nf, nfs: dados.nfs });
     });
 }, (erro) => {
-    console.error("❌ Erro Crítico ao escutar o Firebase:", erro);
+    console.error("❌ Erro Crítico do Vigia:", erro);
 });
 
 // ========================================================================
-// 4. TRUQUE PARA O RENDER NÃO DESLIGAR O SERVIDOR (EXPRESS WEB SERVER)
+// 4. TRUQUE DO RENDER PARA MANTER O SERVIDOR LIGADO
 // ========================================================================
 const app = express();
-
-app.get('/', (req, res) => {
-    res.send('✅ O Servidor de Notificações Push da Imetame está Online e escutando o Firebase!');
-});
-
+app.get('/', (req, res) => res.send('✅ O Servidor de Notificações da Imetame está Online!'));
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`🌐 Servidor Web Express rodando na porta ${PORT} (Isso mantém o Render ativo).`);
-});
+app.listen(PORT, () => console.log(`🌐 Servidor Web rodando na porta ${PORT}.`));
