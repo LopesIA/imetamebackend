@@ -1,4 +1,5 @@
 const admin = require('firebase-admin');
+const { getFirestore } = require('firebase-admin/firestore'); // <-- ADICIONADO AQUI
 const express = require('express');
 
 // ========================================================================
@@ -17,20 +18,23 @@ try {
 } catch (error) {
     console.error("❌ ERRO CRÍTICO: Não foi possível carregar as credenciais do Firebase.");
     console.error("Se estiver no Render, verifique se você criou a variável FIREBASE_SERVICE_ACCOUNT.");
-    process.exit(1); // Derruba o servidor se não tiver a chave
+    process.exit(1); 
 }
 
-admin.initializeApp({
+const appFirebase = admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
 
-const db = admin.firestore();
+// ========================================================================
+// A GRANDE CORREÇÃO: DIZENDO O NOME EXATO DO SEU BANCO DE DADOS
+// ========================================================================
+const db = getFirestore(appFirebase, "imetametransportebanco");
 
 // Memória local para sabermos o estado "anterior" da requisição
 const estadoAnterior = new Map();
 
 console.log("🚀 Servidor de Notificações Imetame iniciado com sucesso!");
-console.log("👀 Vigiando o banco de dados...");
+console.log("👀 Vigiando o banco 'imetametransportebanco'...");
 
 // ========================================================================
 // 2. FUNÇÃO PRINCIPAL DE DISPARO DE NOTIFICAÇÃO PUSH (FCM)
