@@ -1,7 +1,10 @@
 const admin = require('firebase-admin');
+const express = require('express');
 
+// ========================================================================
 // 1. INICIALIZAÇÃO DO FIREBASE ADMIN
-// Você precisa baixar o arquivo JSON de chaves privadas lá no painel do Firebase (Configurações do Projeto > Contas de Serviço)
+// ========================================================================
+// Lembre-se de colocar o arquivo serviceAccountKey.json na mesma pasta!
 const serviceAccount = require('./serviceAccountKey.json');
 
 admin.initializeApp({
@@ -16,50 +19,58 @@ const estadoAnterior = new Map();
 console.log("🚀 Servidor de Notificações Imetame iniciado com sucesso!");
 console.log("👀 Vigiando o banco de dados...");
 
-// 2. FUNÇÃO PARA ENVIAR A NOTIFICAÇÃO
+// ========================================================================
+// 2. FUNÇÃO PRINCIPAL DE DISPARO DE NOTIFICAÇÃO PUSH (FCM)
+// ========================================================================
 async function enviarNotificacao(tipoDestinatario, nomeDestinatario, titulo, mensagem) {
     try {
         let usuariosQuery;
 
         // Descobre para quem enviar buscando na coleção 'usuarios'
         if (tipoDestinatario === 'Admin') {
+            // Se for para Admin, busca todos que são Admin ou Dev
             usuariosQuery = await db.collection('usuarios').where('cargo', 'in', ['Admin', 'Dev']).get();
         } else if (tipoDestinatario === 'UsuarioEspecifico' && nomeDestinatario) {
+            // Se for para alguém específico (Solicitante ou Líder), busca pelo nome
             usuariosQuery = await db.collection('usuarios').where('nome', '==', nomeDestinatario).get();
         }
 
         if (!usuariosQuery || usuariosQuery.empty) {
-            console.log(`   [!] Nenhum usuário encontrado para: ${tipoDestinatario} (${nomeDestinatario})`);
+            console.log(`   [!] Nenhum usuário encontrado para: ${tipoDestinatario} (${nomeDestinatario || 'Geral'})`);
             return;
         }
 
-        // Pega os tokens de notificação (FCM Token) salvos no perfil do usuário
+        // Pega os tokens de notificação (FCM Token) salvos no perfil de cada usuário encontrado
         const tokens = [];
         usuariosQuery.forEach(doc => {
             const user = doc.data();
-            if (user.fcmToken) tokens.push(user.fcmToken); // fcmToken é o código do celular do usuário
+            if (user.fcmToken) tokens.push(user.fcmToken); 
         });
 
-        console.log(`🔔 NOTIFICANDO [${tipoDestinatario === 'Admin' ? 'ADMINISTRADORES' : nomeDestinatario}]: ${titulo} - ${mensagem}`);
+        console.log(`🔔 PREPARANDO AVISO [${tipoDestinatario === 'Admin' ? 'ADMINISTRADORES' : nomeDestinatario}]: ${titulo} - ${mensagem}`);
 
-        // Se tiver token de celular cadastrado, dispara via Firebase Cloud Messaging
+        // Se encontrou celulares cadastrados com Token, dispara a notificação
         if (tokens.length > 0) {
             const payload = {
-                notification: { title: titulo, body: mensagem },
+                notification: { 
+                    title: titulo, 
+                    body: mensagem 
+                },
                 tokens: tokens
             };
             const response = await admin.messaging().sendMulticast(payload);
             console.log(`   ✅ Sucesso: ${response.successCount} enviadas | Falhas: ${response.failureCount}`);
         } else {
-            console.log(`   ⚠️ Os usuários foram encontrados, mas não possuem Token de celular cadastrado para receber o push.`);
-            // AQUI VOCÊ PODE COLOCAR UM DISPARO DE E-MAIL SE PREFERIR (ex: Nodemailer)
+            console.log(`   ⚠️ Usuários encontrados, mas eles ainda não possuem o Token de celular cadastrado no banco de dados.`);
         }
     } catch (error) {
-        console.error("   ❌ Erro ao enviar notificação:", error);
+        console.error("   ❌ Erro crítico ao enviar notificação:", error);
     }
 }
 
-// 3. MONITORAMENTO EM TEMPO REAL DA COLEÇÃO 'REQUISICOES'
+// ========================================================================
+// 3. O VIGIA: ESCUTANDO A COLEÇÃO 'REQUISICOES' EM TEMPO REAL
+// ========================================================================
 db.collection('requisicoes').onSnapshot(snapshot => {
     snapshot.docChanges().forEach(change => {
         const id = change.doc.id;
@@ -67,7 +78,7 @@ db.collection('requisicoes').onSnapshot(snapshot => {
         const statusAtual = dados.status;
         const seq = String(dados.sequencial || 'NOVA').padStart(4, '0');
         
-        // Pega o estado e dados de antes para comparar
+        // Pega o estado anterior para comparar o que mudou
         const prev = estadoAnterior.get(id) || {};
         const statusAnterior = prev.status;
 
@@ -77,9 +88,7 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             return; 
         }
 
-        // ========================================================================
         // 🚨 REGRA 1: Encarregado Comum criou -> Notifica o Encarregado Líder
-        // ========================================================================
         if (change.type === 'added' && statusAtual === 'AGUARDANDO_LIDER') {
             enviarNotificacao('UsuarioEspecifico', dados.lider_solicitacao, 
                 'Nova Requisição da Equipe', 
@@ -87,9 +96,7 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             );
         }
 
-        // ========================================================================
-        // 🚨 REGRA 2: Encarregado Líder aprovou -> Notifica o Administrador
-        // ========================================================================
+        // 🚨 REGRA 2: Encarregado Líder aprovou -> Notifica os Administradores
         if (statusAnterior === 'AGUARDANDO_LIDER' && statusAtual === 'SOLICITADO') {
             enviarNotificacao('Admin', null, 
                 'Nova Requisição Aprovada', 
@@ -97,17 +104,15 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             );
         }
 
-        // (Extra) Se o encarregado comum não tiver líder, ele vai direto para SOLICITADO
+        // 🚨 REGRA 2.1: Encarregado criou direto (Sem líder) -> Notifica os Administradores
         if (change.type === 'added' && statusAtual === 'SOLICITADO') {
             enviarNotificacao('Admin', null, 
-                'Nova Requisição', 
+                'Nova Requisição Recebida', 
                 `A Req #${seq} foi criada por ${dados.solicitante} e aguarda Geração de SC.`
             );
         }
 
-        // ========================================================================
         // 🚨 REGRA 3: Admin gerou SC -> Notifica o Solicitante
-        // ========================================================================
         if (statusAnterior !== 'AGUARDANDO_OC' && statusAtual === 'AGUARDANDO_OC') {
             enviarNotificacao('UsuarioEspecifico', dados.solicitante, 
                 'SC Gerada!', 
@@ -115,9 +120,7 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             );
         }
 
-        // ========================================================================
-        // 🚨 REGRA 4: Admin (ou Compras) anexou OC -> Notifica o Solicitante
-        // ========================================================================
+        // 🚨 REGRA 4: Compras/Admin anexou OC -> Notifica o Solicitante
         if (statusAnterior !== 'AGUARDANDO_NF' && statusAtual === 'AGUARDANDO_NF') {
             enviarNotificacao('UsuarioEspecifico', dados.solicitante, 
                 'Ordem de Compra Emitida!', 
@@ -125,10 +128,8 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             );
         }
 
-        // ========================================================================
-        // 🚨 REGRA 5: Anexou NF (Danfe) ou NFS -> Notifica Solicitante para Assinar
-        // ========================================================================
-        // Compara se o status mudou para EM_ANALISE_NF, ou se anexou uma nota nova enquanto já estava lá
+        // 🚨 REGRA 5: Solicitante/Encarregado anexou NF (Danfe) ou NFS -> Notifica Solicitante para Assinar
+        // Verifica se o PDF da NF ou NFS apareceu agora
         const anexouNFNova = dados.nf && !prev.nf;
         const anexouNFSNova = dados.nfs && !prev.nfs;
 
@@ -142,9 +143,7 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             );
         }
 
-        // ========================================================================
-        // 🚨 REGRA 6: Solicitante assinou as notas -> Notifica o Admin
-        // ========================================================================
+        // 🚨 REGRA 6: Solicitante assinou as notas -> Notifica os Administradores
         if (statusAnterior === 'EM_ANALISE_NF' && statusAtual === 'CONFERENCIA_NF') {
             enviarNotificacao('Admin', null, 
                 'Notas Assinadas!', 
@@ -152,9 +151,25 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             );
         }
 
-        // ATUALIZA A MEMÓRIA PARA O PRÓXIMO CICLO
+        // ATUALIZA A MEMÓRIA PARA O PRÓXIMO CICLO DE MUDANÇAS
         estadoAnterior.set(id, { status: statusAtual, sc: dados.sc, oc: dados.oc, nf: dados.nf, nfs: dados.nfs });
     });
 }, (erro) => {
-    console.error("❌ Erro ao escutar o Firebase:", erro);
+    console.error("❌ Erro Crítico ao escutar o Firebase:", erro);
+});
+
+
+// ========================================================================
+// 4. TRUQUE PARA O RENDER NÃO DESLIGAR O SERVIDOR (EXPRESS WEB SERVER)
+// ========================================================================
+const app = express();
+
+app.get('/', (req, res) => {
+    res.send('✅ O Servidor de Notificações Push da Imetame está Online e escutando o Firebase!');
+});
+
+// A porta é definida pelo Render através do process.env.PORT
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🌐 Servidor Web Express rodando na porta ${PORT} (Isso mantém o Render ativo).`);
 });
