@@ -1,0 +1,16 @@
+{
+  "name": "imetame-notificacoes",
+  "version": "1.0.0",
+  "description": "Servidor de Notificações Push para o App Imetame",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "firebase-admin": "^12.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
