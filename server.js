@@ -2,10 +2,23 @@ const admin = require('firebase-admin');
 const express = require('express');
 
 // ========================================================================
-// 1. INICIALIZAÇÃO DO FIREBASE ADMIN
+// 1. INICIALIZAÇÃO DO FIREBASE ADMIN (SEGURO PARA O RENDER)
 // ========================================================================
-// Lembre-se de colocar o arquivo serviceAccountKey.json na mesma pasta!
-const serviceAccount = require('./serviceAccountKey.json');
+let serviceAccount;
+
+try {
+    // Se estiver no Render, ele vai ler o texto do cofre secreto
+    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+        serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    } else {
+        // Se estiver testando no seu PC, ele lê o arquivo normal
+        serviceAccount = require('./serviceAccountKey.json');
+    }
+} catch (error) {
+    console.error("❌ ERRO CRÍTICO: Não foi possível carregar as credenciais do Firebase.");
+    console.error("Se estiver no Render, verifique se você criou a variável FIREBASE_SERVICE_ACCOUNT.");
+    process.exit(1); // Derruba o servidor se não tiver a chave
+}
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -13,7 +26,7 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-// Memória local para sabermos o estado "anterior" da requisição e não mandar notificação duplicada
+// Memória local para sabermos o estado "anterior" da requisição
 const estadoAnterior = new Map();
 
 console.log("🚀 Servidor de Notificações Imetame iniciado com sucesso!");
@@ -26,12 +39,9 @@ async function enviarNotificacao(tipoDestinatario, nomeDestinatario, titulo, men
     try {
         let usuariosQuery;
 
-        // Descobre para quem enviar buscando na coleção 'usuarios'
         if (tipoDestinatario === 'Admin') {
-            // Se for para Admin, busca todos que são Admin ou Dev
             usuariosQuery = await db.collection('usuarios').where('cargo', 'in', ['Admin', 'Dev']).get();
         } else if (tipoDestinatario === 'UsuarioEspecifico' && nomeDestinatario) {
-            // Se for para alguém específico (Solicitante ou Líder), busca pelo nome
             usuariosQuery = await db.collection('usuarios').where('nome', '==', nomeDestinatario).get();
         }
 
@@ -40,7 +50,6 @@ async function enviarNotificacao(tipoDestinatario, nomeDestinatario, titulo, men
             return;
         }
 
-        // Pega os tokens de notificação (FCM Token) salvos no perfil de cada usuário encontrado
         const tokens = [];
         usuariosQuery.forEach(doc => {
             const user = doc.data();
@@ -49,19 +58,15 @@ async function enviarNotificacao(tipoDestinatario, nomeDestinatario, titulo, men
 
         console.log(`🔔 PREPARANDO AVISO [${tipoDestinatario === 'Admin' ? 'ADMINISTRADORES' : nomeDestinatario}]: ${titulo} - ${mensagem}`);
 
-        // Se encontrou celulares cadastrados com Token, dispara a notificação
         if (tokens.length > 0) {
             const payload = {
-                notification: { 
-                    title: titulo, 
-                    body: mensagem 
-                },
+                notification: { title: titulo, body: mensagem },
                 tokens: tokens
             };
             const response = await admin.messaging().sendMulticast(payload);
             console.log(`   ✅ Sucesso: ${response.successCount} enviadas | Falhas: ${response.failureCount}`);
         } else {
-            console.log(`   ⚠️ Usuários encontrados, mas eles ainda não possuem o Token de celular cadastrado no banco de dados.`);
+            console.log(`   ⚠️ Usuários encontrados, mas sem Token de celular cadastrado.`);
         }
     } catch (error) {
         console.error("   ❌ Erro crítico ao enviar notificação:", error);
@@ -78,17 +83,14 @@ db.collection('requisicoes').onSnapshot(snapshot => {
         const statusAtual = dados.status;
         const seq = String(dados.sequencial || 'NOVA').padStart(4, '0');
         
-        // Pega o estado anterior para comparar o que mudou
         const prev = estadoAnterior.get(id) || {};
         const statusAnterior = prev.status;
 
-        // IGNORA A PRIMEIRA CARGA DO SERVIDOR PARA NÃO FLOODAR NOTIFICAÇÕES VELHAS
         if (!statusAnterior && change.type === 'added') {
             estadoAnterior.set(id, { status: statusAtual, sc: dados.sc, oc: dados.oc, nf: dados.nf, nfs: dados.nfs });
             return; 
         }
 
-        // 🚨 REGRA 1: Encarregado Comum criou -> Notifica o Encarregado Líder
         if (change.type === 'added' && statusAtual === 'AGUARDANDO_LIDER') {
             enviarNotificacao('UsuarioEspecifico', dados.lider_solicitacao, 
                 'Nova Requisição da Equipe', 
@@ -96,7 +98,6 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             );
         }
 
-        // 🚨 REGRA 2: Encarregado Líder aprovou -> Notifica os Administradores
         if (statusAnterior === 'AGUARDANDO_LIDER' && statusAtual === 'SOLICITADO') {
             enviarNotificacao('Admin', null, 
                 'Nova Requisição Aprovada', 
@@ -104,7 +105,6 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             );
         }
 
-        // 🚨 REGRA 2.1: Encarregado criou direto (Sem líder) -> Notifica os Administradores
         if (change.type === 'added' && statusAtual === 'SOLICITADO') {
             enviarNotificacao('Admin', null, 
                 'Nova Requisição Recebida', 
@@ -112,7 +112,6 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             );
         }
 
-        // 🚨 REGRA 3: Admin gerou SC -> Notifica o Solicitante
         if (statusAnterior !== 'AGUARDANDO_OC' && statusAtual === 'AGUARDANDO_OC') {
             enviarNotificacao('UsuarioEspecifico', dados.solicitante, 
                 'SC Gerada!', 
@@ -120,7 +119,6 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             );
         }
 
-        // 🚨 REGRA 4: Compras/Admin anexou OC -> Notifica o Solicitante
         if (statusAnterior !== 'AGUARDANDO_NF' && statusAtual === 'AGUARDANDO_NF') {
             enviarNotificacao('UsuarioEspecifico', dados.solicitante, 
                 'Ordem de Compra Emitida!', 
@@ -128,8 +126,6 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             );
         }
 
-        // 🚨 REGRA 5: Solicitante/Encarregado anexou NF (Danfe) ou NFS -> Notifica Solicitante para Assinar
-        // Verifica se o PDF da NF ou NFS apareceu agora
         const anexouNFNova = dados.nf && !prev.nf;
         const anexouNFSNova = dados.nfs && !prev.nfs;
 
@@ -143,7 +139,6 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             );
         }
 
-        // 🚨 REGRA 6: Solicitante assinou as notas -> Notifica os Administradores
         if (statusAnterior === 'EM_ANALISE_NF' && statusAtual === 'CONFERENCIA_NF') {
             enviarNotificacao('Admin', null, 
                 'Notas Assinadas!', 
@@ -151,13 +146,11 @@ db.collection('requisicoes').onSnapshot(snapshot => {
             );
         }
 
-        // ATUALIZA A MEMÓRIA PARA O PRÓXIMO CICLO DE MUDANÇAS
         estadoAnterior.set(id, { status: statusAtual, sc: dados.sc, oc: dados.oc, nf: dados.nf, nfs: dados.nfs });
     });
 }, (erro) => {
     console.error("❌ Erro Crítico ao escutar o Firebase:", erro);
 });
-
 
 // ========================================================================
 // 4. TRUQUE PARA O RENDER NÃO DESLIGAR O SERVIDOR (EXPRESS WEB SERVER)
@@ -168,7 +161,6 @@ app.get('/', (req, res) => {
     res.send('✅ O Servidor de Notificações Push da Imetame está Online e escutando o Firebase!');
 });
 
-// A porta é definida pelo Render através do process.env.PORT
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🌐 Servidor Web Express rodando na porta ${PORT} (Isso mantém o Render ativo).`);
