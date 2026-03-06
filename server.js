@@ -1,41 +1,47 @@
 const admin = require('firebase-admin');
+const { getFirestore } = require('firebase-admin/firestore');
 const express = require('express');
 
 // ========================================================================
-// 1. INICIALIZAÇÃO
+// 1. INICIALIZAÇÃO E CORREÇÃO DE CHAVES
 // ========================================================================
 let serviceAccount;
 
 try {
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
         serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+        // O PULO DO GATO: Conserta as quebras de linha da chave privada que o Render bagunça
+        if (serviceAccount.private_key) {
+            serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+        }
     } else {
         serviceAccount = require('./serviceAccountKey.json');
     }
 } catch (error) {
-    console.error("❌ ERRO CRÍTICO: Não foi possível carregar as credenciais do Firebase.");
+    console.error("❌ ERRO CRÍTICO: O arquivo JSON da chave está mal formatado.");
     process.exit(1); 
 }
 
-admin.initializeApp({
+const appFirebase = admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
 
-// Usando o banco de dados PADRÃO do Firebase
-const db = admin.firestore();
+// AQUI ESTÁ O SEGREDO: Conectando no banco de dados EXATO que você criou
+const db = getFirestore(appFirebase, "imetametransportebanco");
+
 const estadoAnterior = new Map();
 
 console.log("======================================================");
-console.log("🚀 Servidor Imetame INICIADO (Versão DEFINITIVA com Radar)");
+console.log("🚀 Servidor Imetame INICIADO (Conectado ao Banco Correto)");
 console.log("======================================================");
 
 // ========================================================================
 // 📡 RADAR INICIAL - VERIFICA SE ESTÁ LENDO O LUGAR CERTO
 // ========================================================================
 db.collection('requisicoes').get().then(snap => {
-    console.log(`📡 [RADAR ATIVO]: O Firebase detectou ${snap.docs.length} requisições já cadastradas no banco.`);
+    console.log(`📡 [RADAR ATIVO]: O Firebase detectou ${snap.docs.length} requisições no banco 'imetametransportebanco'.`);
 }).catch(err => {
-    console.log(`❌ Erro no Radar: Não conseguiu ler a coleção. Detalhes:`, err);
+    console.log(`❌ Erro no Radar (Verifique o nome do banco ou permissões):`, err);
 });
 
 // ========================================================================
@@ -72,7 +78,7 @@ async function enviarNotificacao(tipoDestinatario, nomeDestinatario, titulo, men
             const response = await admin.messaging().sendMulticast(payload);
             console.log(`   ✅ SUCESSO! Celulares notificados: ${response.successCount}`);
         } else {
-            console.log(`   ⚠️ Os usuários foram achados, mas não possuem o Token (fcmToken) no banco de dados. Cadastre a permissão no App.`);
+            console.log(`   ⚠️ O usuário foi achado, mas não possui o Token de celular cadastrado no banco.`);
         }
     } catch (error) {
         console.error("   ❌ Erro ao enviar notificação:", error);
@@ -92,13 +98,11 @@ db.collection('requisicoes').onSnapshot(snapshot => {
         const prev = estadoAnterior.get(id) || {};
         const statusAnterior = prev.status;
 
-        // IGNORA A PRIMEIRA CARGA DO SERVIDOR
         if (!statusAnterior && change.type === 'added') {
             estadoAnterior.set(id, { status: statusAtual, sc: dados.sc, oc: dados.oc, nf: dados.nf, nfs: dados.nfs });
             return; 
         }
 
-        // REGRAS DE NOTIFICAÇÃO
         if (change.type === 'added' && statusAtual === 'AGUARDANDO_LIDER') {
             enviarNotificacao('UsuarioEspecifico', dados.lider_solicitacao, 'Nova Requisição da Equipe', `Req #${seq} aguardando sua aprovação.`);
         }
@@ -137,7 +141,7 @@ db.collection('requisicoes').onSnapshot(snapshot => {
 });
 
 // ========================================================================
-// 4. TRUQUE DO RENDER PARA MANTER O SERVIDOR LIGADO
+// 4. TRUQUE DO RENDER PARA MANTER LIGADO
 // ========================================================================
 const app = express();
 app.get('/', (req, res) => res.send('✅ O Servidor de Notificações da Imetame está Online!'));
