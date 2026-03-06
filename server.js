@@ -75,7 +75,7 @@ async function enviarNotificacao(tipoDestinatario, nomeDestinatario, titulo, men
                 notification: { title: titulo, body: mensagem },
                 tokens: tokens
             };
-            const response = await admin.messaging().sendMulticast(payload);
+            const response = await admin.messaging().sendEachForMulticast(payload);
             console.log(`   ✅ SUCESSO! Celulares notificados: ${response.successCount}`);
         } else {
             console.log(`   ⚠️ O usuário foi achado, mas não possui o Token de celular cadastrado no banco.`);
